@@ -1,51 +1,71 @@
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import httpx
+from bs4 import BeautifulSoup
+import re
 import asyncio
 
-app = FastAPI(title="Sofascore JSON Proxy - Light & Fast")
+app = FastAPI(title="Sofascore Proxy - Best Version")
 
-SOFASCORE_BASE = "https://www.sofascore.com/api/v1/event"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+SOFASCORE_API = "https://www.sofascore.com/api/v1/event"
+SOFASCORE_PAGE = "https://www.sofascore.com/tennis/match"
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "mode": "best-hybrid"}
 
 @app.get("/event/{event_id}")
 async def get_event(event_id: int, clean_pbp: bool = False):
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Get main event data (score, status, etc.)
-            event_resp = await client.get(f"{SOFASCORE_BASE}/{event_id}")
-            event_data = event_resp.json() if event_resp.status_code == 200 else {}
+        async with httpx.AsyncClient(timeout=25.0, headers=HEADERS) as client:
+            # 1. Try Sofascore API first (fast)
+            api_url = f"{SOFASCORE_API}/{event_id}"
+            resp = await client.get(api_url)
+            event_data = resp.json() if resp.status_code == 200 else {}
 
-            # Get incidents / PBP
-            inc_resp = await client.get(f"{SOFASCORE_BASE}/{event_id}/incidents")
+            inc_resp = await client.get(f"{api_url}/incidents")
             incidents = inc_resp.json().get("incidents", []) if inc_resp.status_code == 200 else []
 
-        response = {
-            "event": event_data,
-            "incidents": incidents,
-            "incidents_count": len(incidents),
-            "source": "sofascore"
-        }
+            # 2. Fallback: If no incidents, scrape the page
+            if not incidents:
+                page_url = f"{SOFASCORE_PAGE}/placeholder/{event_id}"
+                page_resp = await client.get(page_url)
+                if page_resp.status_code == 200:
+                    soup = BeautifulSoup(page_resp.text, "html.parser")
+                    # Try to extract current score from page (basic)
+                    score_text = soup.find(string=re.compile(r"\d+-\d+"))
+                    if score_text:
+                        event_data["live_score_text"] = score_text.strip()
 
-        # Optional clean PBP list
-        if clean_pbp:
-            pbp = []
-            for inc in incidents:
-                pbp.append({
-                    "time": inc.get("time"),
-                    "type": inc.get("incidentType"),
-                    "player": inc.get("player", {}).get("name") if inc.get("player") else None,
-                    "homeScore": inc.get("homeScore"),
-                    "awayScore": inc.get("awayScore"),
-                    "description": inc.get("description")
-                })
-            response["pbp"] = pbp
-            response["pbp_count"] = len(pbp)
+            response = {
+                "event": event_data,
+                "incidents": incidents,
+                "incidents_count": len(incidents),
+                "source": "sofascore"
+            }
 
-        return JSONResponse(content=response)
+            # Clean PBP list
+            if clean_pbp and incidents:
+                pbp = []
+                for inc in incidents:
+                    pbp.append({
+                        "time": inc.get("time"),
+                        "type": inc.get("incidentType"),
+                        "player": inc.get("player", {}).get("name") if inc.get("player") else None,
+                        "homeScore": inc.get("homeScore"),
+                        "awayScore": inc.get("awayScore"),
+                        "description": inc.get("description")
+                    })
+                response["pbp"] = pbp
+                response["pbp_count"] = len(pbp)
+
+            return JSONResponse(content=response)
 
     except Exception as e:
         return JSONResponse(

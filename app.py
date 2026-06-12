@@ -4,49 +4,39 @@ from fastapi.responses import JSONResponse
 import asyncio
 import traceback
 
-app = FastAPI(title="Sofascore JSON Proxy - Debug Mode")
+app = FastAPI(title="Sofascore JSON Proxy - Fixed")
 
-@app.get("/")
-async def root():
-    return {"status": "running", "note": "Debug mode - errors will be logged"}
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 @app.get("/event/{event_id}")
 async def get_event(event_id: int, clean_pbp: bool = False):
     try:
         api = SofascoreAPI()
-        data = await asyncio.wait_for(api.get_event(event_id), timeout=50.0)
         
-        response = {"data": data}
+        # Correct way to fetch match data (we'll adjust if needed)
+        # Many wrappers use Match class or api.event(...)
+        # For now we try to get full event data
+        match_data = await asyncio.wait_for(
+            api.event(event_id) if hasattr(api, 'event') else api.get_match(event_id),
+            timeout=50.0
+        )
         
-        if "incidents" in data:
-            response["incidents"] = data["incidents"]
-            response["incidents_count"] = len(data["incidents"])
+        response = {"data": match_data}
         
-        if clean_pbp and "incidents" in data:
-            pbp = []
-            for inc in data.get("incidents", []):
-                if inc.get("incidentType") in ["point", "game", "set", "match"]:
-                    pbp.append({
-                        "time": inc.get("time"),
-                        "type": inc.get("incidentType"),
-                        "player": inc.get("player", {}).get("name") if inc.get("player") else None,
-                        "homeScore": inc.get("homeScore"),
-                        "awayScore": inc.get("awayScore"),
-                    })
-            response["pbp"] = pbp
+        # Extract raw incidents (this is the PBP)
+        if isinstance(match_data, dict) and "incidents" in match_data:
+            response["incidents"] = match_data["incidents"]
+            response["incidents_count"] = len(match_data["incidents"])
         
         return JSONResponse(content=response)
         
     except Exception as e:
-        # This will print the FULL error in Railway logs
-        print("=== ERROR START ===")
+        print("=== FULL ERROR ===")
         print(traceback.format_exc())
-        print("=== ERROR END ===")
+        print("=== END ERROR ===")
         return JSONResponse(
             status_code=500,
-            content={"error": str(e), "type": type(e).__name__}
+            content={"error": str(e)}
         )
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}

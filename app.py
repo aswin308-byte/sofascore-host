@@ -1,56 +1,50 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 import httpx
 import os
 
-app = FastAPI(title="API-Tennis Proxy - GOD MODE Ready")
+app = FastAPI(title="API-Tennis Full Proxy - GOD MODE Ready")
 
-# === CONFIGURATION ===
-API_BASE = os.getenv("API_TENNIS_BASE", "https://api.api-tennis.com/tennis")
+API_BASE = "https://api.api-tennis.com/tennis"
 API_KEY = os.getenv("API_TENNIS_KEY", "0fe87cdf50ab7e026c1d82c5d9818e8214c97f8fdf8437c38088fb2fedef28fb")
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "ok",
-        "source": "api-tennis",
-        "note": "Using Railway environment variables"
-    }
+    return {"status": "ok", "source": "api-tennis-full", "features": "livescore + fixtures + match + PBP"}
 
-@app.get("/event/{event_id}")
-async def get_event(event_id: str):
-    """
-    Returns full match data + point-by-point + current game score (15-30-40 etc.)
-    """
-    try:
-        async with httpx.AsyncClient(timeout=25.0) as client:
-            params = {
-                "APIkey": API_KEY,
-                "match_key": event_id,
-                "method": "get_match"   # ← change this if your docs use a different method name
-            }
+@app.get("/livescore")
+async def livescore(tournament: str = None):
+    params = {"method": "get_livescore", "APIkey": API_KEY}
+    if tournament:
+        params["tournament_key"] = tournament  # add if known
+    return await call_api(params)
 
-            resp = await client.get(API_BASE, params=params)
+@app.get("/fixtures")
+async def fixtures(date_start: str = "2026-06-12", date_stop: str = "2026-06-14"):
+    params = {"method": "get_fixtures", "APIkey": API_KEY, "date_start": date_start, "date_stop": date_stop}
+    return await call_api(params)
 
-            if resp.status_code == 200:
-                data = resp.json()
-                return JSONResponse(content={
-                    "success": True,
-                    "pbp": data.get("pointbypoint", []),
-                    "scores": data.get("scores", {}),
-                    "current_game": data.get("current_game", {}),
-                    "raw": data,
-                    "source": "api-tennis"
-                })
-            else:
-                return JSONResponse(
-                    status_code=resp.status_code,
-                    content={"error": resp.text}
-                )
+@app.get("/event/{match_key}")
+async def event(match_key: str):
+    params = {"method": "get_fixtures", "APIkey": API_KEY, "match_key": match_key}
+    return await call_api(params)
 
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+async def call_api(params):
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        resp = await client.get(API_BASE, params=params)
+        if resp.status_code == 200:
+            data = resp.json()
+            return JSONResponse(content={
+                "success": True,
+                "matches": data.get("results", data),
+                "pbp_example": "See 'pointbypoint' in response",
+                "source": "api-tennis-full"
+            })
+        return JSONResponse(status_code=resp.status_code, content={"error": resp.text})
 
 @app.get("/")
 async def root():
-    return {"message": "API-Tennis Proxy ready. Use /event/{match_key}"}
+    return {
+        "message": "Full API-Tennis Proxy ready",
+        "usage": "/livescore | /fixtures | /event/{match_key}"
+    }

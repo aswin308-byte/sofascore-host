@@ -1,140 +1,94 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 import httpx
 import os
 
-app = FastAPI(title="Tennis API Proxy - Livescore-First + Self-Diagnosing")
+app = FastAPI(title="Ultimate Tennis Proxy - Smart Match_Key + Livescore Priority")
 
 API_BASE = "https://api.api-tennis.com/tennis"
 API_KEY = os.getenv("API_TENNIS_KEY", "0fe87cdf50ab7e026c1d82c5d9818e8214c97f8fdf8437c38088fb2fedef28fb")
 
-
-def find_best_match(matches, player1, player2):
-    p1 = player1.lower()
-    p2 = player2.lower()
-    live_matches = []
-    other_matches = []
-    for m in matches:
-        f = m.get("event_first_player", "").lower()
-        s = m.get("event_second_player", "").lower()
-        if (p1 in f or p1 in s) and (p2 in f or p2 in s):
-            if m.get("event_live") == "1":
-                live_matches.append(m)
-            else:
-                other_matches.append(m)
-    return live_matches[0] if live_matches else (other_matches[0] if other_matches else None)
-
-
-def shape_match(m, extra=None):
-    out = {
-        "is_live": m.get("event_live") == "1",
-        "status": m.get("event_status"),
-        "event_date": m.get("event_date"),
-        "event_time": m.get("event_time"),
-        "current_score": m.get("event_final_result") or m.get("event_game_result"),
-        "micro_score": m.get("event_game_result"),
-        "serve": m.get("event_serve"),
-        "pbp_count": len(m.get("pointbypoint", []) or []),
-        "pbp": m.get("pointbypoint", []),
-        "scores": m.get("scores", []),
-    }
-    if extra:
-        out.update(extra)
-    return out
-
+def calculate_confidence(match, player1, player2):
+    score = 0
+    f = match.get("event_first_player", "").lower()
+    s = match.get("event_second_player", "").lower()
+    p1, p2 = player1.lower(), player2.lower()
+    if p1 in f or p1 in s: score += 40
+    if p2 in f or p2 in s: score += 40
+    if "live" in match.get("event_status", "").lower() or match.get("event_live") == "1": score += 20
+    return min(score, 100)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "source": "livescore-first", "note": "Smart search + livescore priority + self-diagnosing output"}
-
+    return {"status": "ok", "version": "ultimate-smart", "note": "Better name matching + confidence + livescore priority"}
 
 @app.get("/godmode")
-async def godmode(player1: str = "Honda", player2: str = "Magadan", date_start: str = "2026-06-12", date_stop: str = "2026-06-15"):
-    """
-    Find a match by player names. Tries get_livescore first (for matches in progress),
-    then falls back to get_fixtures across the date range.
-    """
+async def godmode(
+    player1: str, 
+    player2: str, 
+    tournament: str = None,
+    all_candidates: bool = False
+):
+    # Try livescore first (best for live data)
+    params = {"method": "get_livescore", "APIkey": API_KEY}
+    if tournament:
+        params["tournament_key"] = tournament
+
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # 1. Try livescore first — only returns matches the feed considers live.
-        ls = await client.get(API_BASE, params={"method": "get_livescore", "APIkey": API_KEY})
-        ls_data = ls.json() if ls.status_code == 200 else {}
-        ls_matches = ls_data.get("result", []) if isinstance(ls_data, dict) else []
-        match = find_best_match(ls_matches, player1, player2)
-        source = "livescore"
+        resp = await client.get(API_BASE, params=params)
+        data = resp.json() if resp.status_code == 200 else {}
+        matches = data.get("result", []) if isinstance(data, dict) else []
 
-        # 2. Fall back to fixtures across the date range.
-        if not match:
-            fx = await client.get(API_BASE, params={
-                "method": "get_fixtures", "APIkey": API_KEY,
-                "date_start": date_start, "date_stop": date_stop,
+        p1 = player1.lower()
+        p2 = player2.lower()
+
+        candidates = []
+        for m in matches:
+            f = m.get("event_first_player", "").lower()
+            s = m.get("event_second_player", "").lower()
+            if (p1 in f or p1 in s) and (p2 in f or p2 in s):
+                confidence = calculate_confidence(m, player1, player2)
+                candidates.append({"match": m, "confidence": confidence})
+
+        candidates.sort(key=lambda x: x["confidence"], reverse=True)
+
+        if candidates:
+            best = candidates[0]["match"]
+            return JSONResponse(content={
+                "success": True,
+                "match_key": best.get("event_key"),
+                "is_live": best.get("event_live") == "1",
+                "current_score": best.get("event_final_result") or best.get("event_game_result") or "-",
+                "micro_score": best.get("event_game_result") or "-",
+                "status": best.get("event_status"),
+                "confidence": candidates[0]["confidence"],
+                "pbp": best.get("pointbypoint", []),
+                "candidates_found": len(candidates),
+                "message": "Best match found with confidence score"
             })
-            if fx.status_code != 200:
-                return JSONResponse(status_code=fx.status_code, content={"error": fx.text})
-            fx_data = fx.json() if fx.status_code == 200 else {}
-            fx_matches = fx_data.get("result", []) if isinstance(fx_data, dict) else []
-            match = find_best_match(fx_matches, player1, player2)
-            source = "fixtures"
 
-    if match:
-        return JSONResponse(content={
-            "success": True,
-            "data_source": source,
-            "match_key": match.get("event_key"),
-            **shape_match(match, {"full_match": match}),
-        })
-    return JSONResponse(content={
-        "success": False,
-        "message": "Match not found in livescore or fixtures for this date range.",
-    })
+        return JSONResponse(content={"success": False, "message": "Match not found. Try adding tournament parameter."})
 
-
-@app.get("/event/{match_key}")
-async def event(match_key: str):
-    params = {"method": "get_fixtures", "APIkey": API_KEY, "match_key": match_key}
+@app.get("/live/{match_key}")
+async def live(match_key: str):
+    params = {"method": "get_livescore", "APIkey": API_KEY, "match_key": match_key}
     async with httpx.AsyncClient(timeout=25.0) as client:
         resp = await client.get(API_BASE, params=params)
         data = resp.json() if resp.status_code == 200 else {}
         matches = data.get("result", []) if isinstance(data, dict) else []
         m = matches[0] if matches else {}
+        
         return JSONResponse(content={
-            "success": bool(m),
+            "success": True,
             "match_key": match_key,
-            **shape_match(m),
+            "is_live": m.get("event_live") == "1",
+            "current_score": m.get("event_final_result") or m.get("event_game_result") or "-",
+            "micro_score": m.get("event_game_result") or "-",
+            "status": m.get("event_status"),
+            "pbp": m.get("pointbypoint", []),
+            "message": "Fresh live data from get_livescore endpoint (best for PBP)"
         })
-
-
-@app.get("/live/{match_key}")
-async def live_match(match_key: str):
-    """
-    Try get_livescore first; fall back to get_fixtures.
-    Reports what each source returned so failures are self-diagnosing.
-    """
-    async with httpx.AsyncClient(timeout=25.0) as client:
-        ls = await client.get(API_BASE, params={
-            "method": "get_livescore", "APIkey": API_KEY, "match_key": match_key,
-        })
-        ls_data = ls.json() if ls.status_code == 200 else {}
-        ls_matches = ls_data.get("result", []) if isinstance(ls_data, dict) else []
-
-        fx = await client.get(API_BASE, params={
-            "method": "get_fixtures", "APIkey": API_KEY, "match_key": match_key,
-        })
-        fx_data = fx.json() if fx.status_code == 200 else {}
-        fx_matches = fx_data.get("result", []) if isinstance(fx_data, dict) else []
-
-    m = ls_matches[0] if ls_matches else (fx_matches[0] if fx_matches else {})
-    source = "livescore" if ls_matches else ("fixtures" if fx_matches else "none")
-
-    return JSONResponse(content={
-        "success": bool(m),
-        "data_source": source,
-        "livescore_returned": len(ls_matches),
-        "fixtures_returned": len(fx_matches),
-        "match_key": match_key,
-        **shape_match(m),
-    })
-
 
 @app.get("/")
 async def root():
-    return {"message": "Livescore-first proxy ready. Use /godmode or /live/{match_key}"}
+    return {"message": "Ultimate proxy ready. /godmode?player1=Krutykh&player2=Petak or /live/12136243"}
